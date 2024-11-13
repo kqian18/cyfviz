@@ -1,0 +1,1192 @@
+---
+title: "CyCIF data visualization tools"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+library(data.table)
+library(tidyr)  # For gather()
+library(tidyverse)
+library(ggplot2)
+library(ggbeeswarm)
+library(ggpubr)
+library(parallel)
+library(survival)
+library(forestplot)
+library(survminer)
+library(googlesheets4)
+library(RColorBrewer)
+library(ggpubr)
+library(MASS)  # For kde2d to calculate density
+library(plotly)
+library(gridExtra)
+library(grid)
+library(pheatmap)
+library(igraph)
+
+```
+
+```{r read-files}
+# Create an environment to store data
+sctables <- new.env()
+
+# list files
+#files <- list.files(path = "~/Dropbox/data/cycif40/micron_csv", full.names = TRUE) # cycif40
+
+files <- list.files(path = "N:lsp-analysis/cycif-production/73-CRC1_reconstruction_Tcell_KQ/e13_Tcell_activation_abval/csvs", full.names = TRUE)
+
+
+# A function that loads the data from file only when accessed
+load_data <- function(file_path) {
+  # Assuming CSVs; modify this for other formats
+  fread(file_path)
+}
+
+# Function to extract the file name without the extension
+get_file_name <- function(file_path) {
+  file_name <- basename(file_path) # Get the base file name (e.g., "file.csv")
+  file_name_no_ext <- sub("\\.csv$", "", file_name) # Remove ".csv" extension
+  return(file_name_no_ext)
+}
+
+# Initialize the cache storage once
+if (!exists(".cached_data", envir = sctables)) {
+  sctables$.cached_data <- list()
+}
+
+# Store the file paths in the environment using file names as keys
+for (i in seq_along(files)) {
+  local({
+    file_name <- get_file_name(files[i])
+    file_path <- files[i]
+    
+    # Assign the function that lazily loads the data when called
+    assign(file_name, 
+           value = function() {
+             # Load the data only if it's not already cached
+             if (is.null(sctables$.cached_data[[file_name]])) {
+               cat("Loading data from file:", file_path, "\n")  # Debugging message
+               sctables$.cached_data[[file_name]] <- load_data(file_path)
+             }
+             
+             # Return the cached data
+             return(sctables$.cached_data[[file_name]])
+           }, 
+           envir = sctables)
+  })
+}
+
+
+# Visualize data 
+
+#gate = 4000
+#cd8aplot = sctable[, above_gate := CD8a > gate]
+
+#range of marker expression
+summary(sctables$LSP10576()$CD8a)
+
+# Downsample to 10,000 cells for visualization
+set.seed(123)  
+sample_data <- sctables$LSP10576()[sample(nrow(sctables$LSP10576()), 10000), ]
+
+ggplot(sample_data, aes(x = X_centroid, y = Y_centroid, color = CD8a)) +
+  geom_point(size = 0.5) +
+  scale_color_gradient(low = "blue", high = "red") +
+  theme_minimal() +
+  labs(title = "Scatter Plot of CD8a Expression",
+       x = "X Coordinate",
+       y = "Y Coordinate",
+       color = "CD8a Expression")
+
+```
+
+```{r plot-binned}
+# Define the number of bins for X and Y (e.g., 100 bins)
+bins_x <- 100
+bins_y <- 100
+
+sample_data <- sctables$LSP10357()
+#sample_data <- sctable
+
+# Define the breaks (bin edges)
+x_breaks <- seq(min(sample_data$X_centroid), max(sample_data$X_centroid), length.out = bins_x + 1)
+y_breaks <- seq(min(sample_data$Y_centroid), max(sample_data$Y_centroid), length.out = bins_y + 1)
+
+# Assign bin labels using cut
+binned_data <- sample_data %>%
+  mutate(
+    X_bin = cut(X_centroid, breaks = x_breaks, include.lowest = TRUE, labels = FALSE),
+    Y_bin = cut(Y_centroid, breaks = y_breaks, include.lowest = TRUE, labels = FALSE)
+  ) %>%
+  group_by(X_bin, Y_bin) %>%
+  summarise(
+    CD8a = mean(CD8a, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    X_center = (x_breaks[X_bin] + x_breaks[X_bin + 1]) / 2,  # Calculate the bin centers for X
+    Y_center = (y_breaks[Y_bin] + y_breaks[Y_bin + 1]) / 2   # Calculate the bin centers for Y
+  )
+
+# Plot the binned data
+ggplot(binned_data, aes(x = X_center, y = Y_center, fill = CD8a)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  theme_minimal() +
+  labs(title = "Binned Heatmap of Marker Expression",
+       x = "X Coordinate",
+       y = "Y Coordinate",
+       fill = "Marker Expression")
+```
+
+```{r correlation-heatmap}
+#library(pheatmap)
+# 'marker_data' is data frame with markers as columns
+marker_data <- sctables$LSP10733()[, 2:63]
+marker_data <- marker_data[, -c(1, 2,6,10,14,18,21,25,29,33,34,37,41,45,49,53,57,61)] 
+#colnames_wo_hoechst <- sctable[, colnames(sctable)[2:49][!grepl("Hoechst", colnames(sctable)[2:49])]]
+
+# Compute the correlation matrix
+cor_matrix <- cor(marker_data, method = "pearson")  # You can also use "spearman" or "kendall"
+
+# Plot the correlation heatmap
+p <- pheatmap(cor_matrix, 
+         clustering_distance_rows = "euclidean", 
+         clustering_distance_cols = "euclidean", 
+         display_numbers = FALSE,  # Show the correlation values on the heatmap
+         color = colorRampPalette(c("blue", "white", "red"))(100),  # Color scale
+         main = "Marker Correlation Heatmap")
+
+save_pheatmap_pdf <- function(x, filename, width = 8, height = 7) {
+  pdf(filename, width = width, height = height)
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
+
+# Call the function to save as PDF
+#save_pheatmap_pdf(p, "LSP10733_correlation_heatmap.pdf")
+
+# Display the heatmap in RMarkdown
+print(p)
+
+
+```
+
+```{r find-gates}
+
+find_gate <- function(expression, bound = 0.05, manual_gate = NULL) {
+  # Step 1: Perform kernel density estimation (KDE)
+  kde <- density(expression, n = 200)  # n corresponds to 'NumPoints' in MATLAB
+  
+  # Step 2: Identify the peak of the KDE (max density)
+  max1 <- max(kde$y)
+  index1 <- which.max(kde$y)
+  
+  # Step 3: Find the low bound (backwards from the peak)
+  counts2 <- rev(kde$y[1:index1])
+  index2 <- 1
+  while (counts2[index2] > bound * max1 && index2 < length(counts2)) {
+    index2 <- index2 + 1
+  }
+  
+  # Step 4: Find the high bound (forwards from the peak)
+  index3 <- index1
+  while (kde$y[index3] > bound * max1 && index3 < length(kde$y)) {
+    index3 <- index3 + 1
+  }
+  
+  # Step 5: Calculate lowb and highb based on KDE
+  lowb <- ifelse(index1 - index2 > 1, kde$x[index1 - index2], kde$x[1])
+  highb <- kde$x[index3]
+  
+  # Step 6: Adjust highb based on percentile
+  if (highb < quantile(expression, 0.99)) {
+    highb <- quantile(expression, 0.99)
+  }
+  
+  # Step 7: Select the gate based on the middle point or manual gate
+  nump <- floor(length(expression) / 200)
+  mid1 <- floor((index1 + nump) / 2)
+  
+  if (!is.null(manual_gate)) {
+    gate <- manual_gate
+  } else {
+    if ((index1 + index2) < mid1) {
+      gate <- kde$x[index1 + index2]
+    } else {
+      gate <- kde$x[mid1]
+    }
+  }
+  
+  # Step 8: Return the gate and gated cells
+  gated_cells <- expression > gate
+  return(list(gate = gate, lowb = lowb, highb = highb, gated_cells = gated_cells))
+}
+
+
+```
+
+```{r gating-single-marker}
+
+# Example usage: visual_gate(sctables$xxx(), "marker")
+#visual_gate(sctables$LSP10576(), "panCK")
+
+# Visual gating function with user-input updates
+visual_gate <- function(data, channel, mgate = NULL) {
+  # Downsample
+  sample_size = 50000
+  if (nrow(data) > sample_size) {
+    data <- sample_n(data, sample_size)
+  }
+  # Log-transform the marker expression data
+  data[[paste0(channel, "_log")]] <- log(data[[channel]] + 3)
+  
+  # Perform initial gating (either auto or with a manual gate)
+  gate_info <- find_gate(data[[paste0(channel, "_log")]], manual_gate = mgate)
+  data[[paste0(channel, "_gate")]] <- gate_info$gated_cells
+  
+  # Helper function to draw the plots (initially and after updating the gate)
+  draw_plots <- function(gate_value) {
+    # Plot 1: Gating plot (log-transformed data with gate line)
+    plot1 <- ggplot(data, aes_string(x = paste0(channel, "_log"))) +
+      geom_density(fill = "lightblue", alpha = 0.7) +
+      geom_vline(xintercept = gate_value, linetype = "dashed", color = "red", linewidth = 1.5) +
+      labs(title = paste0("Gating ", channel), x = "Log-transformed Marker Expression", y = "Density") +
+      theme_minimal()
+
+    # Plot 2: Digital representation of the log-transformed data
+    plot2 <- ggplot(data, aes(x = X_centroid, y = Y_centroid)) +
+      geom_point(aes_string(color = paste0(channel, "_log")), size = 0.2) +
+      scale_color_gradient(low = "black", high = "white") +
+      theme_minimal() +
+      labs(title = "Digital Representation (log)", color = "Log Expression") +
+      theme(legend.position = "none")
+
+    # Plot 3: Positive/Negative view as a scatter plot
+    plot3 <- ggplot() +
+      geom_point(data = data[data[[paste0(channel, "_gate")]] == FALSE, ], 
+                 aes(x = X_centroid, y = Y_centroid), color = "gray", size = 0.2) +  # Negative cells
+      geom_point(data = data[data[[paste0(channel, "_gate")]] == TRUE, ], 
+                 aes(x = X_centroid, y = Y_centroid), color = "red", size = 1) +  # Positive cells
+      labs(title = paste0(channel, "+ (", round(mean(data[[paste0(channel, "_gate")]]) * 100, 2), "%)")) +
+      theme_minimal() +
+      xlim(c(min(data$X_centroid), max(data$X_centroid))) +
+      ylim(c(min(data$Y_centroid), max(data$Y_centroid))) +
+      xlab("X position") +
+      ylab("Y position")
+
+    # Plot 4: Positive density with contours for positive cells
+    plot4 <- ggplot(data) +
+      geom_point(aes(x = X_centroid, y = Y_centroid), color = "gray", size = 0.2, alpha = 0.5) +  # Negative cells
+      geom_density_2d(data = data[data[[paste0(channel, "_gate")]] == TRUE, ],
+                      aes(x = X_centroid, y = Y_centroid), color = "red") +  # Contour lines for positive cells
+      labs(title = paste0(channel, "+"), x = "X position", y = "Y position") +
+      theme_minimal() +
+      theme(legend.position = "none") +
+      xlim(c(min(data$X_centroid), max(data$X_centroid))) +
+      ylim(c(min(data$Y_centroid), max(data$Y_centroid))) +
+      xlab("X position") +
+      ylab("Y position")
+
+    # Convert ggplot objects to grobs
+    plot1_grob <- ggplotGrob(plot1)
+    plot2_grob <- ggplotGrob(plot2)
+    plot3_grob <- ggplotGrob(plot3)
+    plot4_grob <- ggplotGrob(plot4)
+
+    # Display the plots in a 2x2 grid
+    grid.arrange(plot1_grob, plot2_grob, plot3_grob, plot4_grob, nrow = 2)
+  }
+
+  # Open a new window for the plot (use windows() for Windows)
+  x11()  # Or quartz() on MacOS
+
+  # Draw the initial plots with the automatic gate
+  draw_plots(gate_info$gate)
+
+  # Prompt the user for a new gate or accept the current one
+  while (TRUE) {
+    # Ask the user if they want to accept or update the gate
+    user_input <- readline(prompt = "Enter a new gate value (or press [Enter] to accept and move on): ")
+
+    if (user_input == "") {
+      # User pressed Enter, keep the current gate and move on
+      break
+    } else {
+      # User provided a new gate, update the gate and redraw the plot
+      new_gate <- as.numeric(user_input)
+      
+      if (!is.na(new_gate)) {
+        # Update the gate and redraw the plot
+        gate_info <- find_gate(data[[paste0(channel, "_log")]], manual_gate = new_gate)
+        data[[paste0(channel, "_gate")]] <- gate_info$gated_cells
+        
+        # Redraw the plot with the new gate
+        draw_plots(new_gate)
+      } else {
+        cat("Invalid input. Please enter a numeric value.\n")
+      }
+    }
+  }
+
+
+  # Close the plot window after the user finishes
+  dev.off()
+
+  # Return the final gate information
+  invisible(list(positive_cells = data[[paste0(channel, "_gate")]]))
+  return(gate = gate_info$gate)
+}
+
+
+# Example usage:
+# Assume 'mydata' is a data frame with columns 'X_centroid', 'Y_centroid', and 'Marker1'
+# visual_gate(mydata, "Marker1")
+visual_gate(sctables$LSP10357(), "PanCK")
+
+
+
+```
+
+```{r gating-2D}
+# Example Usage:
+# Assume 'mydata' is a data frame with columns 'X_centroid', 'Y_centroid', 'Marker1', 'Marker2'
+# visual_gate_2d(mydata, "Marker1", "Marker2") can specify reference gate (mgate1)
+
+visual_gate_2d <- function(data, ch1, ch2, mgate1 = NULL, mgate2 = NULL, s1 = 5, sample_size = 50000) {
+  
+  # Sample data if more than 50,000 cells
+  if (nrow(data) > sample_size) {
+    data <- sample_n(data, sample_size)
+  }
+  
+  # Log-transform the marker data
+  data[[paste0(ch1, "_log")]] <- log(data[[ch1]] + 3)
+  data[[paste0(ch2, "_log")]] <- log(data[[ch2]] + 3)
+  
+  # Perform gating for both channels
+  gate1_info <- find_gate(data[[paste0(ch1, "_log")]], manual_gate = mgate1)
+  gate2_info <- find_gate(data[[paste0(ch2, "_log")]], manual_gate = mgate2)
+  
+  # Create new columns for gated data
+  data[[paste0(ch1, "_gate")]] <- gate1_info$gated_cells
+  data[[paste0(ch2, "_gate")]] <- gate2_info$gated_cells
+  
+  # Create a double-positive column
+  data$double_positive <- data[[paste0(ch1, "_gate")]] & data[[paste0(ch2, "_gate")]]
+  
+  # Helper function to draw the plots (initially and after updating the gate)
+  draw_plots <- function() {
+    # Recalculate double-positive column
+    data$double_positive <- data[[paste0(ch1, "_gate")]] & data[[paste0(ch2, "_gate")]]
+    # Calculate quadrant proportions
+    q1 <- mean(data$double_positive)  # Double-positive
+    q2 <- mean(data[[paste0(ch1, "_gate")]] & !data[[paste0(ch2, "_gate")]])  # Ch1-positive, Ch2-negative
+    q3 <- mean(!data[[paste0(ch1, "_gate")]] & !data[[paste0(ch2, "_gate")]])  # Double-negative
+    q4 <- mean(!data[[paste0(ch1, "_gate")]] & data[[paste0(ch2, "_gate")]])  # Ch1-negative, Ch2-positive
+      
+    # Calculate a fold change or odds ratio (similar to MATLAB's "foldx")
+    foldx <- q1 / ((q1 + q2) * (q1 + q4))
+    # # Plot 1: Gating plot (log-transformed data with gate line)
+    # plot1 <- ggplot(data, aes_string(x = paste0(ch2, "_log"))) +
+    #   geom_density(fill = "lightblue", alpha = 0.7) +
+    #   geom_vline(xintercept = gate2_info$gate, linetype = "dashed", color = "red", linewidth = 1.5) +
+    #   labs(title = paste0("Gating ", ch2), x = "Log-transformed Marker Expression", y = "Density") +
+    #   theme_minimal()
+
+    # Plot 1: Density scatter plot with quadrant info (based on MATLAB code)
+    plot1 <- ggplot(data, aes_string(x = paste0(ch1, "_log"), y = paste0(ch2, "_log"))) +
+      #geom_bin2d(bins = 50) +  # Create density-like scatter plot
+      #geom_point(alpha = 0.5, size = 0.5) +  # Individual points
+      #geom_density_2d(color = "black") +  # Contour lines for density
+      geom_point(alpha = 0.2, size = 0.1, color = "lightblue") +  # Color points by density
+      stat_density_2d(aes(fill = ..level..), geom = "polygon") +
+      scale_color_gradient(low = "lightblue", high = "blue") +  # Match point color to density
+      scale_fill_gradient(low = "lightblue", high = "blue") +
+      geom_vline(xintercept = gate1_info$gate, linetype = "dashed", color = "black") +
+      geom_hline(yintercept = gate2_info$gate, linetype = "dashed", color = "black") +
+      #coord_fixed(ratio = 1) +
+      # Dynamic quadrant labels with ch1+ ch2+, etc.
+      annotate("text", x = max(data[[paste0(ch1, "_log")]]) * 0.9, 
+               y = max(data[[paste0(ch2, "_log")]]) * 0.9, 
+               label = paste0(ch1, "+ ", ch2, "+\n", round(q1 * 100, 2), "%"), size = 2.5) +
+      annotate("text", x = max(data[[paste0(ch1, "_log")]]) * 0.8, 
+               y = min(data[[paste0(ch2, "_log")]]) * 1.05, 
+               label = paste0(ch1, "- ", ch2, "+\n", round(q2 * 100, 2), "%"), size = 2.5) +
+      annotate("text", x = min(data[[paste0(ch1, "_log")]]) * 1.25, 
+               y = min(data[[paste0(ch2, "_log")]]) * 1.05, 
+               label = paste0(ch1, "- ", ch2, "-\n", round(q3 * 100, 2), "%"), size = 2.5) +
+      annotate("text", x = min(data[[paste0(ch1, "_log")]]) * 1.25, 
+               y = max(data[[paste0(ch2, "_log")]]) * 1.05, 
+               label = paste0(ch1, "+ ", ch2, "-\n", round(q4 * 100, 2), "%"), size = 2.5) +
+      labs(title = paste0("Double-positive: ", round(q1 * 100, 3), "% (Fold change: ", round(foldx, 2), ")"),
+           x = paste0("Log-transformed ", ch1, " Expression"),
+           y = paste0("Log-transformed ", ch2, " Expression")) +
+      theme_minimal() 
+    
+    # # Plot 2: Double-positive scatter plot for both markers
+    # plot2 <- ggplot(data, aes_string(x = paste0(ch1, "_log"), y = paste0(ch2, "_log"))) +
+    #   geom_point(aes(color = double_positive), size = 0.5, alpha = 0.6) +
+    #   geom_vline(xintercept = gate1_info$gate, linetype = "dashed", color = "black") +
+    #   geom_hline(yintercept = gate2_info$gate, linetype = "dashed", color = "black") +
+    #   scale_color_manual(values = c("FALSE" = "blue", "TRUE" = "red")) +
+    #   theme_minimal() +
+    #   labs(title = paste0("Double-positive cells: ", round(mean(data$double_positive) * 100, 2), "%"))
+    
+    # Plot 2: Double positive plot
+
+    data$channel <- ifelse(data[[paste0(ch2, "_gate")]] == TRUE & data[[paste0(ch1, "_gate")]] == TRUE, 1,  # Double positive
+                         ifelse(data[[paste0(ch2, "_gate")]] == TRUE & data[[paste0(ch1, "_gate")]] == FALSE, 2,  # Ch2 positive only
+                                ifelse(data[[paste0(ch2, "_gate")]] == FALSE & data[[paste0(ch1, "_gate")]] == TRUE, 3,  # Ch1 positive only
+                                       4)))  # Double negative
+
+    # Create subpopulations 
+    category_3 <- data[data$channel == 3, ]
+    category_4 <- data[data$channel == 4, ]
+    category_2 <- data[data$channel == 2, ]
+    category_1 <- data[data$channel == 1, ]
+
+    plot2 <- ggplot() +
+      geom_point(data = category_3, aes(x = X_centroid, y = Y_centroid), 
+                 color = "green", size = 0.1, alpha = 0.7) +  # Category 3 (ch1 positive only)
+      geom_point(data = category_4, aes(x = X_centroid, y = Y_centroid), 
+                 color = "gray", size = 0.2, alpha = 0.8) +  # Category 4 (double negative)
+      geom_point(data = category_2, aes(x = X_centroid, y = Y_centroid), 
+                 color = "red", size = 0.2, alpha = 0.8) +  # Category 2 (ch2 positive only)
+      geom_point(data = category_1, aes(x = X_centroid, y = Y_centroid), 
+                 color = "yellow", size = 0.3, alpha = 0.9) +  # Category 1 (double positive)
+      theme_minimal() +
+      #coord_fixed(ratio = 1) +
+      labs(title = paste0("Double Positive Signal"), x = "X position", y = "Y position") +
+      theme(legend.position = "none", 
+            axis.text = element_blank(),
+            axis.ticks = element_blank())  # Remove axis labels and ticks
+
+    # Plot 3: Points + Contour density plot for ch1 (retaining colored points)
+    density_ch1 <- ggplot(data, aes_string(x = "X_centroid", y = "Y_centroid")) +
+      geom_point(aes_string(color = paste0(ch1, "_gate")), size = 0.2, alpha = 0.6) +
+      geom_density_2d(color = "black") +  # Overlay contour lines on top of points
+      scale_color_manual(values = c("FALSE" = "gray", "TRUE" = "green")) +
+      #coord_fixed(ratio = 1) +
+      theme_minimal() +
+      labs(title = paste0(ch1, " Positive cells: ", round(mean(gate1_info$gated_cells) * 100, 2), "%"))
+
+    # Plot 4: Points + Contour density plot for ch2 (retaining colored points)
+    density_ch2 <- ggplot(data, aes_string(x = "X_centroid", y = "Y_centroid")) +
+      geom_point(aes_string(color = paste0(ch2, "_gate")), size = 0.2, alpha = 0.6) +
+      geom_density_2d(color = "black") +  # Overlay contour lines on top of points
+      scale_color_manual(values = c("FALSE" = "gray", "TRUE" = "red")) +
+      #coord_fixed(ratio = 1) +
+      theme_minimal() +
+      labs(title = paste0(ch2, " Positive cells: ", round(mean(gate2_info$gated_cells) * 100, 2), "%"))
+    
+    # Convert ggplot objects to grobs
+    plot1_grob <- ggplotGrob(plot1)
+    plot2_grob <- ggplotGrob(plot2)
+    plot3_grob <- ggplotGrob(density_ch1)
+    plot4_grob <- ggplotGrob(density_ch2)
+
+    # Display the plots in a 2x2 grid
+    grid.arrange(plot1_grob, plot2_grob, plot3_grob, plot4_grob, nrow = 2)
+  }
+  
+  # Open a new window for the plot (use windows() for Windows)
+  x11()  # Or quartz() on MacOS
+
+  # Draw the initial plots with the automatic gate
+  draw_plots()
+
+  # Prompt the user for a new gate or accept the current one for ch2
+  while (TRUE) {
+    # Ask the user if they want to accept or update the gate for ch2
+    user_input <- readline(prompt = paste0("Enter a new gate value for ", ch2, " or press [Enter] to accept: "))
+
+    if (user_input == "") {
+      # User pressed Enter, keep the current gate and move on
+      break
+    } else {
+      # User provided a new gate for ch2, update the gate and redraw the plot
+      new_gate2 <- as.numeric(user_input)
+      
+      if (!is.na(new_gate2)) {
+        # Update gate for ch2 and redraw the plot
+        gate2_info <- find_gate(data[[paste0(ch2, "_log")]], manual_gate = new_gate2)
+        data[[paste0(ch2, "_gate")]] <- gate2_info$gated_cells
+        
+        # Recalculate double-positive column
+        data$double_positive <- data[[paste0(ch1, "_gate")]] & data[[paste0(ch2, "_gate")]]
+        
+        # Redraw the plots with the new gate for ch2
+        draw_plots()
+      } else {
+        cat("Invalid input. Please enter a numeric value.\n")
+      }
+    }
+  }
+  
+  # Close the plot window after the user finishes
+  dev.off()
+  
+  # Return the gates for both channels
+  #invisible(list(gated_data = data, gate1 = gate1_info$gate, gate2 = gate2_info$gate))
+  list(gate1 = gate1_info$gate, gate2 = gate2_info$gate)
+}
+
+
+#visual_gate_2d(sctables$LSP10532(), "panCK", "CD8a")
+visual_gate_2d(sctable, "panCK", "PD1", mgate1 = 6.4)
+
+
+```
+
+
+```{r gating-all-chs}
+# gate multiple markers in a sample as a series (with one ref gate)
+# Assume 'allChs' is the list of markers (channels)
+#allChs <- colnames(sctables$LSP10532())[2:49] # Example marker list
+
+# Example usage
+# Assuming you have a data frame 'mydata' and a list of markers 'allChs'
+# allChs <- c("Marker1", "Marker2", "Marker3")
+# refGate <- "Marker1"  # Reference marker for gating
+# refGateValue <- 7.5   # Initial gate value for the reference marker
+
+# Call the gating_loop function 
+# gating_loop(mydata, allChs, refGate, refGateValue)
+
+marker_data <- sctables$LSP10733()[, 2:63]
+marker_data <- marker_data[, -c(1, 2,6,10,14,18,21,25,29,33,34,37,41,45,49,53,57,61)] 
+allChs <- colnames(marker_data)
+refGateValue <- NULL  # Placeholder for reference gate values
+refGate <- "PanCK"  # Assume Marker1 is the reference gate
+
+
+# Main gating function that loops through all markers
+gating_loop <- function(data, allChs, refGate, refGateValue = NULL) {
+  # Initialize a vector to store gate values for all markers
+  gatevals <- numeric(length(allChs))  
+  
+  for (i in seq_along(allChs)) {
+    setGate <- allChs[i]
+    cat("Processing marker:", setGate, "\n")
+    
+    if (setGate == refGate) {
+      # For the reference gate, use the refGateValue
+      result <- visual_gate(data, setGate, refGateValue)
+      refGateValue <- result$gate  # Update the reference gate for future use
+      gatevals[i] <- refGateValue  # Save the gate value to the vector
+    } else {
+      # For other markers, use visual_gate_2d (double-positive gating)
+      result_2D <- visual_gate_2d(data, refGate, setGate, refGateValue)
+      gatevals[i] <- result_2D$gate1  # Save the gate value for the current marker
+    }
+  }
+  
+  # Return the vector of gate values
+  return(gatevals)
+}
+
+
+gating_loop(sctables$LSP10357(), allChs, refGate, 7.0)
+
+```
+
+```{r setgate}
+# CycIF_setgate helper function to apply gates to the actual data (cell-level data) and create binarized columns
+CycIF_setgate <- function(table, marker, gate) {
+  # Ensure the input is a data.table and assign by reference
+  if (!is.data.table(table)) setDT(table)  # Make sure `table` is converted to a data.table if it isn’t already
+  
+  # Define the gated column name
+  gatename <- paste0(marker, "p")
+  
+  # Check if the marker exists in the data
+  if (!marker %in% colnames(table)) {
+    stop(paste0("Marker column '", marker, "' does not exist in the input data."))
+  } else {
+    message("Marker column found: ", marker)
+  }
+  
+  # Check the gate value
+  message("Gate value (exp(gate)) is: ", exp(gate))
+  
+  # Attempt to create the gated column and add it to the table
+  table[, (gatename) := as.numeric(get(marker) > exp(gate))] 
+  
+  # Check if the new column was added
+  if (gatename %in% colnames(table)) {
+    message("New gated column added: ", gatename)
+  } else {
+    message("Failed to add the new gated column.")
+  }
+  
+  return(table)  # Return the updated data with the gated column
+}
+
+```
+
+```{r gating-summarytable}
+# generate binarized columns for marker positivity
+#usage: CycIF_gating_all_clean(gates)
+
+gates <- fread("C:/Users/kq18/HMS Dropbox/Kristin Qian/data/tcell/pilot_gates.csv")
+setnames(gates, old = "V1", new = "slideName")
+
+
+CycIF_gating_all_clean <- function(gateTable) {
+  samplesize <- as.numeric(readline(prompt = "Please input sample size: "))  # User input for sample size
+  doubleflag <- as.numeric(readline(prompt = "Double gating (1:yes, 0:no): "))  # User input for double gating (1: yes, 0: no)
+  
+  allmarkers <- colnames(gateTable)[-1]  # Extract all marker names (except the first column)
+  
+  for (i in seq_len(nrow(gateTable))) {
+    file_name <- gateTable$slideName[i]  # Extract the slide name (same as file name)
+    
+    # Load the cached data using the function
+    data1 <- sctables[[file_name]]()  # Invoke the lazy-loading function to load the data
+    
+    cat(paste0("Processing slide: ", file_name, "\n"))
+    #setDT(data1)  # Convert to data.table if not already
+    
+    # -- Gating all channels (single-gate) --
+    for (marker in allmarkers) {
+      
+      # Match the marker name in gateTable and extract the correct gate value using the marker name directly
+      if (marker %in% colnames(data1)) {
+        gateValue <- gateTable[[marker]][i]  # Get the gate value for the current marker and slide
+        
+        # Apply gating using CycIF_setgate
+        CycIF_setgate(data1, marker, gateValue)  
+      } else {
+        cat("Warning: Marker", marker, "not found in data1 for slide", file_name, "\n")
+      }
+    }
+    
+    # -- Double gating (if applicable) --
+    if (doubleflag == 1) {
+      for (j in seq_len(nrow(doubleGates))) {
+        gate1 <- paste0(doubleGates[j, 1], "p")
+        gate2 <- paste0(doubleGates[j, 2], "p")
+        gatename <- paste0(gate1, gate2)
+        
+        # Create double gating column based on logical AND of both gates
+        data1[, (gatename) := get(gate1) & get(gate2)]
+      }
+    }
+    
+    # -- Update the cached data1 back into the cache --
+    #sctables[[file_name]] <- function() data1  # Replace the cached function with the updated data
+    
+    # Clear the data1 object from memory after processing
+    rm(data1)
+    gc()  # Run garbage collection to free memory
+  }
+}
+
+
+
+CycIF_gating_all_clean(gates)
+
+# can feed these tables directly into cyftools pipeline to run chain etc 
+
+```
+
+```{r test-loop}
+### loop through each marker to gate
+for (marker in allmarkers) {
+      
+      # Match the marker name in gateTable and extract the correct gate value using the marker name directly
+      if (marker %in% colnames(sctables[["LSP10790"]]())) {
+        gateValue <- gates[[marker]][24]  # Get the gate value for the current marker and slide
+        
+        # Apply gating using CycIF_setgate
+        CycIF_setgate(sctables[["LSP10790"]](), marker, gateValue)  # In-place update
+      } else {
+        cat("Warning: Marker", marker, "not found in data1 for slide", file_name, "\n")
+      }
+}
+
+
+# allmarkers <- colnames(gates)[-1]  # Extract all marker names (except the first column)
+#   
+#   for (i in seq_len(nrow(gates))) {
+#     file_name <- gates$slideName[i]  # Extract the slide name (same as file name)
+#     
+#     # Load the cached data using the function
+#     data1 <- sctables[[file_name]]()  # Invoke the lazy-loading function to load the data
+#     
+#     cat(paste0("Processing slide: ", file_name, "\n"))
+#     #setDT(data1)  # Convert to data.table if not already
+#     
+#     # -- Gating all channels (single-gate) --
+#     for (marker in allmarkers) {
+#       
+#       # Match the marker name in gateTable and extract the correct gate value using the marker name directly
+#       if (marker %in% colnames(data1)) {
+#         gateValue <- gates[[marker]][i]  # Get the gate value for the current marker and slide
+#         
+#         # Apply gating using CycIF_setgate
+#         CycIF_setgate(data1, marker, gateValue)  # In-place update
+#       } else {
+#         cat("Warning: Marker", marker, "not found in data1 for slide", file_name, "\n")
+#       }
+#     }
+#   }
+# 
+
+
+
+
+
+```
+
+```{r save-gated-csvs}
+# Loop through each table in sctables and save as a CSV
+for (file_name in names(sctables)) {
+  # Load the table using the function (if it's cached as a function)
+  data <- sctables[[file_name]]()
+  
+  # Create a file name for the CSV
+  csv_file_name <- paste0(file_name, ".csv")
+  
+  # Save the table to a CSV file
+  write.csv(data, csv_file_name, row.names = FALSE)
+  
+  cat("Saved", csv_file_name, "\n")
+}
+
+write.csv(sctables$LSP10733(), "LSP10733.p.csv", row.names = FALSE)
+
+
+
+#sctables$LSP10554 <- function() NULL  # Clear the table by setting it to NULL
+#sctables$.cached_data[["LSP10554"]] <- NULL  # Clear cached data
+
+```
+
+
+```{r summary-stats}
+# Function to calculate proportion of positive cells in batches and accumulate in memory
+calculate_proportion_positive_batch_memory <- function(data, batch_size = 10000) {
+  
+  # Split the data into smaller batches
+  n <- nrow(data)
+  batch_indices <- split(seq_len(n), ceiling(seq_len(n) / batch_size))
+  
+  # Initialize an empty list to accumulate batch results
+  result_list <- list()
+  
+  # Loop through each batch and process
+  for (i in seq_along(batch_indices)) {
+    # Process each batch
+    batch <- data[batch_indices[[i]], ]
+    
+    # Identify columns that end with "p" (gating columns)
+    p_columns <- colnames(batch)[grepl("p$", colnames(batch))]
+    
+    # Calculate proportion of positive cells (p == 1) for each marker by tTopic
+    result <- batch %>%
+      group_by(tTopic) %>%
+      dplyr::summarise(across(all_of(p_columns), 
+                     list(sum = ~ sum(.x, na.rm = TRUE), 
+                          total = ~ n(), 
+                          proportion = ~ mean(.x, na.rm = TRUE))))  # Proportion is just mean for binary 1/0 columns
+    
+    # Append the result to the list
+    result_list[[i]] <- result
+    
+    cat(paste0("Batch ", i, " processed.\n"))
+  }
+  
+  # Combine all batch results into a single data frame
+  final_result <- bind_rows(result_list)
+  
+  return(final_result)
+}
+
+batchsum <- calculate_proportion_positive_batch_memory(sctables$LSP10532())
+
+# Function to calculate final summary after combining batches
+final_proportion_summary <- function(combined_data) {
+  
+  # Re-summarize the combined data to get one proportion per marker per topic
+  final_summary <- combined_data %>%
+    group_by(tTopic) %>%
+    dplyr::summarise(across(everything(), mean, na.rm = TRUE))  # Summarize across all columns to get final proportions
+  
+  return(final_summary)
+}
+
+# Apply the final summary function to the combined data
+final_proportion_summary_combined <- final_proportion_summary(batchsum)
+
+# View the final summarized result
+print(final_proportion_summary_combined)
+
+
+```
+
+```{r topic-analysis}
+library(dplyr)
+library(future)
+library(furrr)
+
+# Create an environment to store your data
+sctables <- new.env()
+
+# list files
+files <- list.files(path = "~/Dropbox/data/cycif40/csv/20241002_updatedgates/", full.names = TRUE)
+
+# A function that loads the data from file only when accessed
+load_data <- function(file_path) {
+  # Assuming CSVs; modify this for other formats
+  fread(file_path)
+}
+
+
+# Function to extract the file name without the extension
+get_file_name <- function(file_path) {
+  file_name <- basename(file_path) # Get the base file name (e.g., "file.csv")
+  file_name_no_ext <- sub("\\.csv$", "", file_name) # Remove ".csv" extension
+  return(file_name_no_ext)
+}
+
+# Initialize the cache storage once
+if (!exists(".cached_data", envir = sctables)) {
+  sctables$.cached_data <- list()
+}
+
+
+# Store the file paths in the environment using file names as keys
+for (i in seq_along(files)) {
+  local({
+    file_name <- get_file_name(files[i])
+    file_path <- files[i]
+    
+    # Assign the function that lazily loads the data when called
+    assign(file_name, 
+           value = function() {
+             # Load the data only if it's not already cached
+             if (is.null(sctables$.cached_data[[file_name]])) {
+               cat("Loading data from file:", file_path, "\n")  # Debugging message
+               sctables$.cached_data[[file_name]] <- load_data(file_path)
+             }
+             
+             # Return the cached data
+             return(sctables$.cached_data[[file_name]])
+           }, 
+           envir = sctables)
+  })
+}
+
+
+# Function to calculate proportion of positive cells in batches with lazy loading
+calculate_proportion_positive_lazy <- function(sctables, table_name, batch_size = 10000) {
+  
+  # Load the table using the function stored in sctables
+  data <- sctables[[table_name]]()  # Load the data dynamically
+
+  # Split the data into smaller batches
+  n <- nrow(data)
+  batch_indices <- split(seq_len(n), ceiling(seq_len(n) / batch_size))
+  
+  # Initialize an empty list to accumulate batch results
+  result_list <- list()
+  
+  # Loop through each batch and process
+  for (i in seq_along(batch_indices)) {
+    # Process each batch
+    batch <- data[batch_indices[[i]], ]
+    
+    # Identify columns that end with "p" (gating columns)
+    p_columns <- colnames(batch)[grepl("p$", colnames(batch))]
+    
+    # Calculate proportion of positive cells (p == 1) for each marker by tTopic
+    result <- batch %>%
+      group_by(tTopic) %>%
+      dplyr::summarise(across(all_of(p_columns), 
+                     list(sum = ~ sum(.x, na.rm = TRUE), 
+                          total = ~ n(), 
+                          proportion = ~ mean(.x, na.rm = TRUE))))  # Proportion is just mean for binary 1/0 columns
+    
+    # Append the result to the list
+    result_list[[i]] <- result
+    
+    cat(paste0("Batch ", i, " processed for table: ", table_name, "\n"))
+  }
+  
+  # Combine all batch results into a single data frame
+  final_result <- bind_rows(result_list)
+  
+  return(final_result)
+}
+
+# Example usage for one table:
+#batchsum <- calculate_proportion_positive_lazy(sctables, "LSP10532")  # Loads sctables$LSP10532()
+
+# Function to process and summarize across all tables in sctables
+calculate_combined_proportions_across_tables <- function(sctables, batch_size = 10000) {
+  table_names <- names(sctables)[sapply(sctables, is.function) & grepl("^LSP", names(sctables))]
+  # Get all table names in sctables
+  
+  # Initialize an empty list to accumulate results across all tables
+  all_results <- list()
+  
+  # Loop through each table name in sctables
+  for (table_name in table_names) {
+    cat("Processing table:", table_name, "\n")
+    
+    # Calculate proportions for the current table
+    batchsum <- calculate_proportion_positive_lazy(sctables, table_name, batch_size = batch_size)
+    
+    # Append the result to the list
+    all_results[[table_name]] <- batchsum
+  }
+  
+  # Combine the results from all tables into one
+  combined_data <- bind_rows(all_results, .id = "table_name")  # Keep track of table origin
+  
+  return(combined_data)
+}
+
+# plan(multicore)  # or plan(multiprocess) for cross-platform compatibility
+# 
+# all_combined_results <- future_map_dfr(names(sctables), function(table_name) {
+#   calculate_proportion_positive_lazy(sctables, table_name)
+# })
+
+
+
+# Example usage for all tables in sctables:
+all_combined_results <- calculate_combined_proportions_across_tables(sctables)
+
+
+# Function to calculate final summary after combining proportions across all tables
+final_proportion_summary <- function(combined_data) {
+  
+  # Re-summarize the combined data to get final proportions for each marker by tTopic
+  final_summary <- combined_data %>%
+    group_by(tTopic) %>%
+    dplyr::summarise(across(where(is.numeric), mean, na.rm = TRUE))  # Summarize only numeric columns to get final proportions
+  
+  return(final_summary)
+}
+
+# Assuming 'all_combined_results' contains a column 'tTopic' (topic ID) and 'table_name' (sample/slide ID)
+# Calculate the fraction of each topic per sample
+topic_fraction_per_sample <- all_combined_results %>%
+  group_by(table_name, tTopic) %>%
+  dplyr::summarise(Topic_Fraction = n() / nrow(.))  # Fraction of topic per sample
+
+# Step 1: Calculate the total number of cells for each sample
+total_cells_per_sample <- all_combined_results %>%
+  group_by(table_name) %>%
+  dplyr::summarise(Total_Cells = n())
+
+# Step 2: Calculate the fraction of each topic per sample
+topic_fraction_per_sample <- all_combined_results %>%
+  group_by(table_name, tTopic) %>%
+  dplyr::summarise(Topic_Count = n(), .groups = 'drop') %>%
+  left_join(total_cells_per_sample, by = "table_name") %>%
+  mutate(Topic_Fraction = Topic_Count / Total_Cells)
+
+
+
+
+
+# Apply the final summary function to the combined data
+final_proportion_summary_combined <- final_proportion_summary(all_combined_results)
+
+
+### visualization
+
+# Reshape the data from wide to long format, focusing on the proportion columns
+long_sample <- pivot_longer(final_proportion_summary_combined, 
+                            cols = ends_with("proportion"), 
+                            names_to = "Marker", 
+                            values_to = "Proportion")
+long_sample$Marker <- str_replace(long_sample$Marker, "p_proportion", "")
+
+# Create the bar plot
+ggplot(long_sample, aes(x = Marker, y = Proportion, fill = Marker)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~tTopic, scales = "free_y") +  # Create a plot per tTopic
+  labs(title = "Proportions of Markers by Topic",
+       x = "Marker",
+       y = "Proportion") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+
+
+
+unique_topics <- unique(long_sample$tTopic)
+
+output_directory <- "/Users/kristin/HMS Dropbox/Kristin Qian/data/cycif40/plots/"
+
+# Loop through each topic and generate individual plots
+for (topic in unique_topics) {
+  # Subset data for the current topic
+  topic_data <- long_sample[long_sample$tTopic == topic, ]
+  
+  # Create a plot for the current topic
+  p <- ggplot(topic_data, aes(x = Marker, y = Proportion, fill = Marker)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = paste("Proportions of Markers for Topic", topic),
+         x = "Marker",
+         y = "Proportion") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10))
+  
+  # Print the plot
+  print(p)
+  
+  # Save the plot
+  plot_filename <- paste0(output_directory, "Topic_", topic, "_Proportion_Plot.png")  # Change file extension if needed
+  ggsave(filename = plot_filename, plot = p, width = 8, height = 6)  # Save the plot to a file
+  
+}
+
+
+
+
+```
+
+```{r clinical-data, include=FALSE}
+crr <- as.data.table(googlesheets4::read_sheet("https://docs.google.com/spreadsheets/d/1VVzcuDDi8_n9NXWFuuUaUR0f9ghpAJO84Ccb31LX-gI/edit?gid=0#gid=0"))
+setnames(crr, "CyCIF_ID", "Slide_ID")
+crr <- crr[!is.na(Slide_ID)]
+#crr[, orion_run := NULL]
+stopifnot(all(!duplicated(crr$Slide_ID)))
+```
+
+```{r km-topic}
+# is each topic predictive (predictive power)?
+
+# Assuming all_combined_results has proportion columns and tTopic and slide ID (e.g., 'table_name')
+# Subset the data to include only the necessary columns: tTopic, slide ID, and proportion columns
+proportion_subset <- all_combined_results %>%
+  select(tTopic, table_name, ends_with("proportion"))  # Assuming "proportion" is part of the column names
+setnames(proportion_subset, "table_name", "Slide_ID")
+
+
+setnames(topic_fraction_per_sample, "table_name", "Slide_ID")
+
+# merge survival data with topic fractions 
+merged_data <- merge(topic_fraction_per_sample, crr, by = "Slide_ID")
+
+
+
+# Create a survival object
+surv_obj_pfs <- Surv(time = as.numeric(merged_data$PFSDays), 
+                     event = as.numeric(ifelse(merged_data$PFSCensor==0,1,0)))
+
+# Stratify based on topic fraction (e.g., for a specific tTopic)
+#merged_data$Topic1_group <- ifelse(merged_data$Topic_Fraction >= median(merged_data$Topic_Fraction, na.rm = TRUE), "High", "Low")
+
+# Filter the data for tTopic == 7
+topic_7_data <- merged_data %>% filter(tTopic == 7)
+
+# Divide the topic fractions into high and low based on the median for tTopic 7
+topic_7_data$Topic7_group <- ifelse(topic_7_data$Topic_Fraction >= median(topic_7_data$Topic_Fraction, na.rm = TRUE), "High", "Low")
+
+# Filter the data for tTopic == 11
+topic_11_data <- merged_data %>% filter(tTopic == 11)
+
+# Divide the topic fractions into high and low based on the median for tTopic 7
+topic_11_data$Topic11_group <- ifelse(topic_11_data$Topic_Fraction >= median(topic_11_data$Topic_Fraction, na.rm = TRUE), "High", "Low")
+
+# Filter the data for tTopic == 8
+topic_8_data <- merged_data %>% filter(tTopic == 8)
+
+# Divide the topic fractions into high and low based on the median for tTopic 7
+topic_8_data$Topic8_group <- ifelse(topic_8_data$Topic_Fraction >= median(topic_8_data$Topic_Fraction, na.rm = TRUE), "High", "Low")
+
+# Filter the data for tTopic == 8
+topic_filter <- merged_data %>% filter(tTopic == 12)
+
+# Divide the topic fractions into high and low based on the median for tTopic 7
+topic_filter$topic_filter <- ifelse(topic_filter$Topic_Fraction >= median(topic_filter$Topic_Fraction, na.rm = TRUE), "High", "Low")
+
+
+surv_obj_pfs <- Surv(time = as.numeric(topic_filter$PFSDays), 
+                     event = as.numeric(ifelse(topic_filter$PFSCensor==0,1,0)))
+
+# Fit the Kaplan-Meier model
+km_fit_pfs <- survfit(surv_obj_pfs ~ topic_filter, data = topic_filter)
+
+# Plot the Kaplan-Meier curve
+ggsurvplot(km_fit_pfs, data = topic_filter,
+           risk.table = FALSE,  # Show the risk table
+           pval = TRUE,        # Show the p-value for log-rank test
+           conf.int = TRUE,    # Show confidence intervals
+           xlab = "Time (PFS)", ylab = "Survival Probability",
+           ggtheme = theme_minimal())
+
+
+s$plot <- s$plot + theme(aspect.ratio = 1)
+
+
+
+# Calculate Pearson correlation between PFS and Topic 7 fraction
+# Convert to numeric if needed
+topic_11_data$PFSDays <- as.numeric(as.character(topic_11_data$PFSDays))
+topic_11_data$Topic_Fraction <- as.numeric(as.character(topic_11_data$Topic_Fraction))
+
+pearson_corr <- cor(topic_11_data$PFSDays, topic_11_data$Topic_Fraction, method = "pearson", use = "complete.obs")
+
+# Print the Pearson correlation coefficient
+cat("Pearson correlation between PFS and Topic 11 Fraction: ", pearson_corr, "\n")
+
+ggplot(topic_11_data, aes(x = Topic_Fraction, y = PFSDays)) +
+    geom_point(color = "blue", size = 2) +
+    geom_smooth(method = "lm", color = "red", se = TRUE) +
+    labs(title = paste("Correlation between Topic", 11, "Fraction and PFS"),
+         x = paste("Topic", 11, "Fraction"), y = "Progression-Free Survival (Days)") +
+    annotate("text", x = max(as.numeric(topic_11_data$Topic_Fraction)) * 0.8, 
+             y = max(as.numeric(topic_11_data$PFSDays)) * 0.9, 
+             label = paste0("Pearson r = ", round(pearson_corr, 3)), 
+             color = "black", size = 5) +
+    theme_minimal()
+
+
+
+```
+
+```{r}
+# Filter the data for topic 7 and 8
+topic_7_8_data <- long_sample %>%
+  filter(tTopic %in% c(7, 8))
+
+# Subset the data for E-cadherin and PanCK markers
+ecad_panck_data <- topic_7_8_data %>%
+  filter(Marker %in% c("Ecad", "panCK"))
+
+# Pivot the data wider to have Ecadherin and PanCK as separate columns
+ecad_panck_wide <- ecad_panck_data %>%
+  pivot_wider(names_from = Marker, values_from = Proportion)
+
+# Calculate the ratio of Ecadherin to PanCK
+ecad_panck_wide <- ecad_panck_wide %>%
+  mutate(Ratio_Ecad_to_PanCK = Ecad / panCK)
+
+# View the results
+print(ecad_panck_wide)
+
+
+
+# Filter the data for topic 7
+topic_7_prop <- long_sample %>%
+  filter(tTopic == 7) %>%
+  select(Marker, Proportion)  # Select only the Marker and Proportion columns
+
+# Print the table for topic 7
+print(topic_7_prop)
+
+
+write.csv(topic_7_prop, "Topic_7_Marker_Proportions.csv", row.names = FALSE)
+
+```
+
