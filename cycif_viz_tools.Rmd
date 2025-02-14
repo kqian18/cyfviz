@@ -33,7 +33,7 @@ sctables <- new.env()
 # list files
 #files <- list.files(path = "~/Dropbox/data/cycif40/micron_csv", full.names = TRUE) # cycif40
 
-files <- list.files(path = "N:lsp-analysis/cycif-production/73-CRC1_reconstruction_Tcell_KQ/e13_Tcell_activation_abval/csvs", full.names = TRUE)
+files <- list.files(path = "N:lsp-data/cycif-production/164-CRC_Giannakis/P164_B462_CyCIF/csvs", full.names = TRUE)
 
 
 # A function that loads the data from file only when accessed
@@ -83,20 +83,20 @@ for (i in seq_along(files)) {
 #cd8aplot = sctable[, above_gate := CD8a > gate]
 
 #range of marker expression
-summary(sctables$LSP10576()$CD8a)
+summary(sctables$LSP20720()$CD56)
 
 # Downsample to 10,000 cells for visualization
 set.seed(123)  
-sample_data <- sctables$LSP10576()[sample(nrow(sctables$LSP10576()), 10000), ]
+sample_data <- sctables$LSP20720()[sample(nrow(sctables$LSP20720()), 10000), ]
 
-ggplot(sample_data, aes(x = X_centroid, y = Y_centroid, color = CD8a)) +
+ggplot(sample_data, aes(x = X_centroid, y = Y_centroid, color = CD56)) +
   geom_point(size = 0.5) +
   scale_color_gradient(low = "blue", high = "red") +
   theme_minimal() +
-  labs(title = "Scatter Plot of CD8a Expression",
+  labs(title = "Scatter Plot of CD56 Expression",
        x = "X Coordinate",
        y = "Y Coordinate",
-       color = "CD8a Expression")
+       color = "CD56 Expression")
 
 ```
 
@@ -142,8 +142,8 @@ ggplot(binned_data, aes(x = X_center, y = Y_center, fill = CD8a)) +
 ```{r correlation-heatmap}
 #library(pheatmap)
 # 'marker_data' is data frame with markers as columns
-marker_data <- sctables$LSP10733()[, 2:63]
-marker_data <- marker_data[, -c(1, 2,6,10,14,18,21,25,29,33,34,37,41,45,49,53,57,61)] 
+marker_data <- sctables$LSP20720()[, 2:29]
+marker_data <- marker_data[, -c(1,5,9,14,19,24)] # removing the Hoechsts
 #colnames_wo_hoechst <- sctable[, colnames(sctable)[2:49][!grepl("Hoechst", colnames(sctable)[2:49])]]
 
 # Compute the correlation matrix
@@ -335,14 +335,14 @@ visual_gate <- function(data, channel, mgate = NULL) {
 
   # Return the final gate information
   invisible(list(positive_cells = data[[paste0(channel, "_gate")]]))
-  return(gate = gate_info$gate)
+  return(list(gate = gate_info$gate))
 }
 
 
 # Example usage:
 # Assume 'mydata' is a data frame with columns 'X_centroid', 'Y_centroid', and 'Marker1'
 # visual_gate(mydata, "Marker1")
-visual_gate(sctables$LSP10357(), "PanCK")
+visual_gate(sctables$LSP20720(), "panCK")
 
 
 
@@ -557,8 +557,9 @@ visual_gate_2d(sctable, "panCK", "PD1", mgate1 = 6.4)
 marker_data <- sctables$LSP10733()[, 2:63]
 marker_data <- marker_data[, -c(1, 2,6,10,14,18,21,25,29,33,34,37,41,45,49,53,57,61)] 
 allChs <- colnames(marker_data)
+toGate <- toGate[!grepl("Hoechst", toGate)]
 refGateValue <- NULL  # Placeholder for reference gate values
-refGate <- "PanCK"  # Assume Marker1 is the reference gate
+refGate <- "panCK"  # Assume Marker1 is the reference gate
 
 
 # Main gating function that loops through all markers
@@ -578,8 +579,10 @@ gating_loop <- function(data, allChs, refGate, refGateValue = NULL) {
     } else {
       # For other markers, use visual_gate_2d (double-positive gating)
       result_2D <- visual_gate_2d(data, refGate, setGate, refGateValue)
-      gatevals[i] <- result_2D$gate1  # Save the gate value for the current marker
+      gatevals[i] <- result_2D$gate2  # Save the gate value for the current marker
+      
     }
+   
   }
   
   # Return the vector of gate values
@@ -629,7 +632,7 @@ CycIF_setgate <- function(table, marker, gate) {
 # generate binarized columns for marker positivity
 #usage: CycIF_gating_all_clean(gates)
 
-gates <- fread("C:/Users/kq18/HMS Dropbox/Kristin Qian/data/tcell/pilot_gates.csv")
+gates <- fread("C:/Users/kq18/HMS Dropbox/Kristin Qian/data/dMMR/CyCIF_gates.csv")
 setnames(gates, old = "V1", new = "slideName")
 
 
@@ -744,18 +747,20 @@ for (marker in allmarkers) {
 # Loop through each table in sctables and save as a CSV
 for (file_name in names(sctables)) {
   # Load the table using the function (if it's cached as a function)
-  data <- sctables[[file_name]]()
+  if (grepl("^LSP", file_name)) {
+    data <- sctables[[file_name]]()
   
-  # Create a file name for the CSV
-  csv_file_name <- paste0(file_name, ".csv")
+    # Create a file name for the CSV
+    csv_file_name <- paste0(file_name, ".p.csv")
   
-  # Save the table to a CSV file
-  write.csv(data, csv_file_name, row.names = FALSE)
+    # Save the table to a CSV file
+    write.csv(data, csv_file_name, row.names = FALSE)
   
-  cat("Saved", csv_file_name, "\n")
+    cat("Saved", csv_file_name, "\n")
+  }
 }
 
-write.csv(sctables$LSP10733(), "LSP10733.p.csv", row.names = FALSE)
+write.csv(sctables$LSP20720(), "LSP10720.p.csv", row.names = FALSE)
 
 
 
